@@ -1,0 +1,3 @@
+#!/bin/sh
+cp -v ajax_ext_radius_devel.php  ajax_ext_radius.php
+cp -v ext_radius_devel.js  ext_radius.js

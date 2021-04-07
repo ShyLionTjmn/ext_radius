@@ -1,0 +1,561 @@
+#!/usr/bin/perl -w
+
+use strict;
+use DBI;
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+$Data::Dumper::Sortkeys = 1;
+use POSIX;
+use utf8;
+
+use Fcntl qw(:flock);
+
+use lib '/opt/ext_radius/etc';
+use radius_options;
+
+binmode(STDOUT, ":utf8");
+binmode(STDERR, ":utf8");
+
+no warnings 'redefine';
+local *Data::Dumper::qquote = sub { qq["${\(shift)}"] };
+# Use the Pure Perl implementation of Dumper
+local $Data::Dumper::Useperl = 1;
+
+my $NORMAL_SLEEP=5; #give time for Interim-Update
+
+my $RADIUSD_MIN_RUNTIME=$radius_options::UPDATE_INTERVAL * 2 + 10; #minimum time radiusd should run, before we kill sessions
+
+our $debug=0;
+my $max_runs;
+
+while( my $arg = shift(@ARGV)) {
+
+  if($arg eq "-d") {
+    $debug++;
+  } elsif($arg eq "-1") {
+    if(!defined($max_runs)) {
+      $max_runs=0;
+    };
+    $max_runs++;
+  };
+};
+
+if($debug) { $NORMAL_SLEEP=5; };
+
+use constant { true => 1, false => 0 };
+
+our $dbh;
+
+our $last_db_ok=-1;
+our $last_db_error=0;
+
+sub log_error {
+  my $message=shift;
+  if($debug) {
+    print(scalar(localtime())." ERROR: $message\n");
+  } else {
+    my $lf;
+    if(open($lf, ">>", $radius_options::COA_LOG)) {
+      binmode($lf, ":utf8");
+      print($lf scalar(localtime())." ERROR: $message\n");
+      close($lf);
+    };
+  };
+};
+
+sub log_message {
+  my $message=shift;
+  if($debug) {
+    print(scalar(localtime())." $message\n");
+  } else {
+    my $lf;
+    if(open($lf, ">>", $radius_options::COA_LOG)) {
+      binmode($lf, ":utf8");
+      print($lf scalar(localtime())." $message\n");
+      close($lf);
+    };
+  };
+};
+
+sub escape_special {
+  return join("", map { if($_ eq "\x0c") { "Deactivate: "; } elsif( $_ eq "\x0b") { "Activate: "; } else { $_; }; } split("", shift));
+};
+
+sub set_state {
+  my $state=shift;
+  my $sf;
+  if(open($sf, ">", $radius_options::STATE_FILE)) {
+    print($sf "$state\n");
+    close($sf);
+    if($debug) { print("Set state: $state\n"); };
+  } else {
+    if($debug) { print("Error opening state file\n"); };
+  };
+};
+
+sub db_check {
+  if($debug > 1) { print("DB check at ".__LINE__."\n"); };
+  my $attempt=0;
+START_OVER:
+  if(!defined($dbh)) {
+    if($debug > 1) { print("DB check start at ".__LINE__."\n"); };
+    $dbh=DBI->connect("DBI:mysql:database=$radius_options::DB_NAME;host=$radius_options::DB_HOST", $radius_options::COA_DB_USER, $radius_options::COA_DB_PASS,
+                      {RaiseError => 0, PrintWarn => 0, PrintError => 0, mysql_enable_utf8 => 1});
+    if(!defined($dbh)) {
+      if($debug > 1) { print("DB connect FAILED at ".__LINE__."\n"); };
+      $last_db_error=time();
+      return false;
+    };
+  };
+  if($dbh->ping) {
+    if($debug > 1) { print("DB ping OK at ".__LINE__."\n"); };
+    $last_db_ok=time();
+    return true;
+  } else {
+    if($debug > 1) { print("DB ping FAILED at ".__LINE__."\n"); };
+    $dbh->disconnect;
+    $dbh=undef;
+    if($attempt > 0) {
+      if($debug > 1) { print("DB check FAILED at ".__LINE__."\n"); };
+      $last_db_error=time();
+      return false;
+    } else {
+      $attempt++;
+      goto START_OVER;
+    };
+  };
+};
+
+my $pid;
+
+if(!flock(DATA, LOCK_EX|LOCK_NB)) {
+  print(STDERR "Another instance already running\n");
+  exit 1;
+};
+
+if(open($pid, ">", $radius_options::PID_FILE)) {
+  print($pid "$$");
+} else {
+  log_error("Cannot open $radius_options::PID_FILE, running without it\n");
+};
+
+my $query;
+my $qres;
+
+log_message("Daemon started");
+
+if($debug) { print("Debug level: $debug\n"); };
+
+MAIN_LOOP: while(1) {
+  my $errors=0;
+  if(defined($max_runs)) {
+    if($max_runs == 0) {
+      last MAIN_LOOP;
+    };
+    $max_runs --;
+  };
+  if($debug > 1) { print("MAIN LOOP start at ".__LINE__."\n"); };
+  if(!db_check()) {
+    if($debug) { print("DB Check failed at ".__LINE__.": ".$DBI::errstr."\n"); };
+    set_state("ERROR: db_check failed");
+    $errors++;
+    if(!defined($max_runs)) { sleep(10); };
+    next;
+  };
+  set_state("OK: db_check success");
+  my $time=time();
+  #check radius daemon status
+
+  my $radiusd_running=0;
+
+  my @fstat=stat($radius_options::RADIUSD_PID_FILE);
+  if(scalar(@fstat)) {
+    my $pfh;
+    if(open($pfh, "<", $radius_options::RADIUSD_PID_FILE)) {
+      my $line=<$pfh>;
+      close($pfh);
+      $line =~s/\n//;
+      $line =~s/\r//;
+      if($line =~ /^\d+$/) {
+        my @ps=map { s/\r//; s/\n//; $_ } qx/ps -o command -p $line/;
+        if(scalar(grep { $_ eq $radius_options::RADIUSD_BINARY } @ps)) {
+          $radiusd_running=time() - $fstat[9];
+          if($debug) { print("DEBUG: radiusd is running for $radiusd_running seconds\n"); };
+        };
+      };
+    };
+  };
+
+  if($radiusd_running == 0) {
+    if($debug) { print("DEBUG: radiusd is not running or in debug mode\n"); };
+  };
+
+
+  if($radiusd_running <= $RADIUSD_MIN_RUNTIME || #radiusd not running or just started
+     ($last_db_ok - $last_db_error) <= $RADIUSD_MIN_RUNTIME #DB not long enough in good condition
+  ) {
+    set_state("WARN radiusd not running or just started or DB not long enough in good condition");
+    if(!defined($max_runs)) { sleep(10); };
+    next;
+  };
+
+  my %coa_queue=();
+
+  $query="SELECT * FROM ss";
+  my $ses_rows=$dbh->selectall_arrayref($query, { Slice=> {}});
+  if(!defined($ses_rows) || $dbh->err) {
+    log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+    set_state("ERROR: DB ERROR at ".__LINE__);
+    $errors++;
+    if(!defined($max_runs)) { sleep(10); };
+    next;
+  };
+
+  if($debug > 2 && defined($max_runs)) {
+    print(Dumper($ses_rows));
+  };
+
+  $query="SELECT CONCAT(TRIM(u_login),'.',u_agent) as _key_, us.* FROM us WHERE u_bill_state < 10";
+  my $accounts=$dbh->selectall_hashref($query, '_key_');
+  if(!defined($accounts) || $dbh->err) {
+    log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+    set_state("ERROR: DB ERROR at ".__LINE__);
+    $errors++;
+    if(!defined($max_runs)) { sleep(10); };
+    next;
+  };
+
+
+SESS:  foreach my $s (@$ses_rows) {
+    my %sr=%$s;
+    my $id=$sr{'s_id'};
+    my $ip=$sr{'s_ip'};
+    my $vg_id=$sr{'s_vg_id'};
+    my $acct_ses_id=$sr{'s_acct_ses_id'};
+    my $nas_ip=$sr{'s_nas_ip'};
+    my $nas_port=$sr{'s_nas_port'};
+    my $login=$sr{'s_login'};
+    my $auth_time=$sr{'s_auth'};
+    my $ses_start=$sr{'s_start'};
+    my $ses_update=$sr{'s_update'};
+    my $state=$sr{'s_state'};
+    my $speed=$sr{'s_speed'};
+    my $agent=$sr{'s_agent'};
+    my $name=$sr{'s_name'};
+    my $anumber=$sr{'s_anumber'};
+
+    my $DEAD_SESSION_AGE=$sr{'s_interim_interval'} * 2 + 10;
+
+    %{$coa_queue{$acct_ses_id}}=();
+    $coa_queue{$acct_ses_id}{'login'}=$login;
+    $coa_queue{$acct_ses_id}{'agent'}=$agent;
+    $coa_queue{$acct_ses_id}{'nas_ip'}=$nas_ip;
+    $coa_queue{$acct_ses_id}{'id'}=$id;
+    $coa_queue{$acct_ses_id}{'old_state'}=$state;
+    $coa_queue{$acct_ses_id}{'time'}=$sr{'s_auth'};
+    $coa_queue{$acct_ses_id}{'vg_id'}=$sr{'s_vg_id'};
+    $coa_queue{$acct_ses_id}{'interim_interval'}=$sr{'s_interim_interval'};
+    $coa_queue{$acct_ses_id}{'scat_svc'}=$sr{'s_scat_svc'};
+
+    if($debug > 2) {
+      print("Check session:\n".Dumper(\%sr));
+    };
+
+    my $tlogin=$login;
+    $tlogin =~ s/^ //g;
+    $tlogin =~ s/ $//g;
+    my $acc_sel=$tlogin.".".$agent;
+
+    if(($time - $ses_update) > $DEAD_SESSION_AGE && ($time - $auth_time) > $DEAD_SESSION_AGE) {
+      # session not updated too long. perhaps NAS switched to another radius. just delete it from DB
+      my $ses_age=$time - $ses_update;
+
+      log_message("Stale session($ses_age vs $DEAD_SESSION_AGE) cleanup: vg_id: $vg_id, agent: $agent, anumber: $anumber, login: $login, name: $name");
+      if($ses_update != 0) {
+        log_message(Dumper(\%sr));
+      };
+
+      $query="DELETE FROM ss WHERE s_id=?";
+      $qres=$dbh->do($query, {}, ($id));
+      if(!defined($qres)) {
+        log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+        set_state("ERROR: DB ERROR at ".__LINE__);
+        $errors++;
+        if(!defined($max_runs)) { sleep(10); };
+        last SESS;
+      };
+    } elsif($sr{'s_kill'} > 0) {
+      # there is drop request from frontend
+
+      $coa_queue{$acct_ses_id}{'cmd'}="drop";
+
+      $query="UPDATE ss SET s_coa_reason=?, s_change_queued=? WHERE s_id=?";
+
+      $dbh->do($query, {}, ("Admin request",$time,$id));
+      if($dbh->err) {
+        log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+        set_state("ERROR: DB ERROR at ".__LINE__);
+        $errors++;
+        if(!defined($max_runs)) { sleep(10); };
+        last SESS;
+      };
+      log_message("Kill sesion by admin request: vg_id: $vg_id, agent: $agent, anumber: $anumber, login: $login, name: $name");
+
+    } elsif($state < 0) {
+      # adopted unknown session, kill it
+
+      $coa_queue{$acct_ses_id}{'cmd'}="drop";
+
+      $query="UPDATE ss SET s_coa_reason=?, s_change_queued=? WHERE s_id=?";
+
+      $dbh->do($query, {}, ("Adopted unknown session kill",$time,$id));
+      if($dbh->err) {
+        log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+        set_state("ERROR: DB ERROR at ".__LINE__);
+        $errors++;
+        if(!defined($max_runs)) { sleep(10); };
+        last SESS;
+      };
+      log_message("Kill unknown adopted sesion: vg_id: $vg_id, agent: $agent, anumber: $anumber, login: $login, name: $name");
+
+    } elsif(!defined(${$accounts}{$acc_sel}) || ${$accounts}{$acc_sel}{'u_bill_state'} >= 10) {
+      # user account deleted
+
+      $coa_queue{$acct_ses_id}{'cmd'}="drop";
+
+      $query="UPDATE ss SET s_coa_reason=?, s_change_queued=? WHERE s_id=?";
+
+      $dbh->do($query, {}, ("Account gone",$time,$id));
+      if($dbh->err) {
+        log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+        set_state("ERROR: DB ERROR at ".__LINE__);
+        $errors++;
+        if(!defined($max_runs)) { sleep(10); };
+        last SESS;
+      };
+      log_message("Kill sesion, account gone: vg_id: $vg_id, agent: $agent, anumber: $anumber, login: $login, name: $name");
+
+    } else {
+      my $target_state = (${$accounts}{$acc_sel}{'u_bill_state'} == 0) ? 0 : 1;
+
+      my $Vslogin=${$accounts}{$acc_sel}{'u_anumber'};
+      my $u_scat_login=${$accounts}{$acc_sel}{'u_scat_login'};
+      $u_scat_login =~ s/^ //g;
+      $u_scat_login =~ s/ $//g;
+      if($u_scat_login ne "") {
+        $Vslogin=$u_scat_login;
+      };
+
+      $coa_queue{$acct_ses_id}{'slogin'}=$Vslogin;
+
+      ${$accounts}{$acc_sel}{'u_scat_ips'} =~ s/^ //g;
+      ${$accounts}{$acc_sel}{'u_scat_ips'} =~ s/ $//g;
+
+      $coa_queue{$acct_ses_id}{'sips'}=${$accounts}{$acc_sel}{'u_scat_ips'};
+
+      #check if some vital data changed
+      if(${$accounts}{$acc_sel}{'u_vg_id'} ne $sr{'s_vg_id'}  ||
+         ${$accounts}{$acc_sel}{'u_anumber'} ne $sr{'s_anumber'} ||
+         false
+      ) {
+        $coa_queue{$acct_ses_id}{'cmd'}="drop";
+
+        $query="UPDATE ss SET s_coa_reason=?, s_change_queued=? WHERE s_id=?";
+
+        $dbh->do($query, {}, ("Account data changed",$time,$id));
+        if($dbh->err) {
+          log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+          set_state("ERROR: DB ERROR at ".__LINE__);
+          $errors++;
+          if(!defined($max_runs)) { sleep(10); };
+          last SESS;
+        };
+        log_message("Kill sesion. Account vg_id or anumber changed: vg_id: $vg_id => ${$accounts}{$acc_sel}{'u_vg_id'}"
+          .", agent: $agent, anumber: $anumber => ${$accounts}{$acc_sel}{'u_anumber'}, login: $login, name: $name"
+        );
+
+      } elsif(($state != $target_state && $target_state == 0 && ${$accounts}{$acc_sel}{'u_speed'} == 0) ||
+        ($state == 0 && $state == $target_state && $speed != ${$accounts}{$acc_sel}{'u_speed'} && ${$accounts}{$acc_sel}{'u_speed'} == 0)
+      ) {
+        #cannot remove policer, restart session
+        $coa_queue{$acct_ses_id}{'cmd'}="drop";
+
+        $query="UPDATE ss SET s_coa_reason=?, s_change_queued=? WHERE s_id=?";
+
+        $dbh->do($query, {}, ("Policy removal",$time,$id));
+        if($dbh->err) {
+          log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+          set_state("ERROR: DB ERROR at ".__LINE__);
+          $errors++;
+          if(!defined($max_runs)) { sleep(10); };
+          last SESS;
+        };
+        log_message("Kill sesion. Need to remove policer: vg_id: $vg_id, agent: $agent, anumber: $anumber, login: $login, name: $name");
+
+      } elsif($state != $target_state ||
+              ($state == 0 && $speed != ${$accounts}{$acc_sel}{'u_speed'}) ||
+              false
+      ) {
+        $coa_queue{$acct_ses_id}{'cmd'}="reshape";
+        $coa_queue{$acct_ses_id}{'state'}=$target_state;
+        $coa_queue{$acct_ses_id}{'speed'}=${$accounts}{$acc_sel}{'u_speed'};
+
+        my $update_reason="Account speed change";
+        if($state != $target_state) {
+          $coa_queue{$acct_ses_id}{'cmd'}="state".$target_state;
+          $update_reason="Account state change";
+          log_message("Restate sesion: state: $state -> $target_state, vg_id: $vg_id, agent: $agent, anumber: $anumber, login: $login, name: $name");
+        } else {
+          log_message("Respeed sesion: speed $speed -> ${$accounts}{$acc_sel}{'u_speed'}, vg_id: $vg_id, agent: $agent, anumber: $anumber, login: $login, name: $name");
+        };
+        $query="UPDATE ss SET s_coa_reason=?, s_change_queued=? WHERE s_id=?";
+
+        $dbh->do($query, {}, ($update_reason,$time,$id));
+        if($dbh->err) {
+          log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+          set_state("ERROR: DB ERROR at ".__LINE__);
+          $errors++;
+          if(!defined($max_runs)) { sleep(10); };
+          last SESS;
+        };
+      };
+    };
+  };
+
+  my $executed=0;
+
+  foreach my $acct_ses_id (keys(%coa_queue)) {
+    if(defined($coa_queue{$acct_ses_id}{'cmd'})) {
+      my $coa_str=undef;
+      my $coacmd="$radius_options::RADCLIENT -t1 -r3 -c1 $coa_queue{$acct_ses_id}{'nas_ip'}:1645 coa $radius_options::COA_SECRET";
+      if($coa_queue{$acct_ses_id}{'cmd'} eq "drop") {
+        $coa_str="User-Name=\"$coa_queue{$acct_ses_id}{'login'}\",Acct-Session-Id=\"$acct_ses_id\",cisco-avpair=\"subscriber:command=account-logoff\"\n";
+      } else {
+        $coa_str="User-Name=\"$coa_queue{$acct_ses_id}{'login'}\",Acct-Session-Id=\"$acct_ses_id\"";
+  
+        $coa_str .= ",Acct-Interim-Interval=$radius_options::UPDATE_INTERVAL";
+  
+        my $coa_speed=1024*$coa_queue{$acct_ses_id}{'speed'};
+        if($coa_speed > $radius_options::MAX_POLICE_BPS) {
+          $coa_speed = $radius_options::MAX_POLICE_BPS;
+        };
+  
+        if($coa_queue{$acct_ses_id}{'cmd'} eq "state0") {
+          foreach my $svc (@radius_options::REDIRECT_SERIVCES) {
+            $coa_str .= ",Cisco-Command-Code=\"\x0c$svc\"";
+          };
+        } elsif($coa_queue{$acct_ses_id}{'cmd'} eq "state1") {
+          foreach my $svc (@radius_options::REDIRECT_SERIVCES) {
+            $coa_str .= ",Cisco-Command-Code=\"\x0b$svc\"";
+          };
+          if($coa_queue{$acct_ses_id}{'speed'} > $radius_options::REDIRECT_SPEED_MAX) {
+            $coa_speed=1024*$radius_options::REDIRECT_SPEED_MAX;
+          };
+        };
+  
+        if($coa_speed > 0) {
+          $coa_str .= ",Cisco-Account-Info=\"QU;$coa_speed;D;$coa_speed\"";
+        };
+  
+        foreach my $svc (@radius_options::ADDITIONAL_SERVICES) {
+          $coa_str .= ",Cisco-Account-Info=\"VS_$svc\"";
+        };
+  
+        foreach my $svc (@radius_options::REDIRECT_SERIVCES) {
+          $coa_str .= ",Cisco-Account-Info=\"VS_$svc\"";
+        };
+  
+        $coa_str .= ",Cisco-Account-Info=\"VR_$radius_options::THIS\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vstate_".$coa_queue{$acct_ses_id}{'state'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vspeed_".$coa_queue{$acct_ses_id}{'speed'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vvg_id_".$coa_queue{$acct_ses_id}{'vg_id'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vagent_".$coa_queue{$acct_ses_id}{'agent'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vtime_".$coa_queue{$acct_ses_id}{'time'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vslogin_".$coa_queue{$acct_ses_id}{'slogin'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vsips_".$coa_queue{$acct_ses_id}{'sips'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vii_".$coa_queue{$acct_ses_id}{'interim_interval'}."\"";
+        $coa_str .= ",Cisco-Account-Info=\"Vssvc_".$coa_queue{$acct_ses_id}{'scat_svc'}."\"";
+      };
+      my $fh;
+      my $openres;
+      #sleep(1);
+      if($debug) {
+        $openres=open($fh, "|$coacmd");
+      } else {
+        $openres=open($fh, "|$coacmd >/dev/null 2>&1");
+      };
+  
+      if(!$openres) {
+        log_error("KILL COMMAND open ERROR at ".__LINE__);
+        set_state("ERROR: KILL COMMAND open ERROR at ".__LINE__);
+        $errors++;
+        if(!defined($max_runs)) { sleep(10); };
+        next MAIN_LOOP;
+      };
+      if($debug) {
+        print(escape_special("Sending: echo \'$coa_str\' | $coacmd\n"));
+      };
+      print($fh $coa_str);
+      if(close($fh)) {
+        #call was successfull
+        $coa_queue{$acct_ses_id}{'coa_executed'}=time();
+        $executed++;
+        if($debug) {
+          print("CoA call success\n");
+        };
+      } else {
+        $coa_queue{$acct_ses_id}{'coa_executed'}=0;
+        if($debug) {
+          print("CoA call FAILED\n");
+        };
+      };
+    };
+  };
+
+  if($debug) { print("Executed: $executed\n"); };
+
+  if($executed) {
+    if(!db_check()) {
+      if($debug) { print("DB Check failed at ".__LINE__.": ".$DBI::errstr."\n"); };
+      set_state("ERROR: DB ERROR at ".__LINE__);
+      $errors++;
+      if(!defined($max_runs)) { sleep(10); };
+      next;
+    };
+
+SESSF: foreach my $acct_ses_id (keys(%coa_queue)) {
+      if(defined($coa_queue{$acct_ses_id}{'cmd'})) {
+
+        if($debug) { print("Checking execute status of: $acct_ses_id\n"); };
+        if(defined($coa_queue{$acct_ses_id}{'coa_executed'}) && $coa_queue{$acct_ses_id}{'coa_executed'} && $coa_queue{$acct_ses_id}{'cmd'} ne 'drop') {
+          if($debug) { print("Updating status of: $acct_ses_id\n"); };
+          $query="UPDATE ss SET s_state_changed=?, s_speed=?, s_state=? WHERE s_id=?";
+          $dbh->do($query, {}, ( $coa_queue{$acct_ses_id}{'coa_executed'}, $coa_queue{$acct_ses_id}{'speed'},
+              $coa_queue{$acct_ses_id}{'state'},$coa_queue{$acct_ses_id}{'id'})
+          );
+          if($dbh->err) {
+            log_error("DB ERROR at ".__LINE__.": ".$dbh->errstr);
+            log_error("\tLogin:".$coa_queue{$acct_ses_id}{'login'});
+            log_error("\tDump:".Dumper($coa_queue{$acct_ses_id}));
+            set_state("ERROR: DB ERROR at ".__LINE__);
+            $errors++;
+            if(!defined($max_runs)) { sleep(10); };
+            last SESSF;
+          };
+        };
+      };
+    };
+  };
+  if(!$errors) { set_state("OK: loop finished"); };
+  if(defined($max_runs) && !$max_runs) {
+    if($debug) { print("Normal quit\n"); };
+    last MAIN_LOOP;
+  };
+  if($debug) { print("Sleeping $NORMAL_SLEEP seconds\n"); };
+  sleep($NORMAL_SLEEP);
+};
+if(defined($dbh)) {
+  $dbh->disconnect();
+};
+
+__DATA__

@@ -1,0 +1,256 @@
+#!/usr/bin/perl
+
+use strict;
+use DBI;
+use Fcntl qw(:flock);
+
+use constant { true => 1, false => 0 };
+
+use Data::Dumper;
+
+$Data::Dumper::Indent=1;
+$Data::Dumper::Sortkeys=1;
+
+binmode(STDOUT, ":utf8");
+binmode(STDERR, ":utf8");
+
+if(!flock(DATA, LOCK_EX|LOCK_NB)) {
+  print( STDERR "Another instance is running!\n");
+  exit 1;
+};
+
+my $local_db="radius";
+my $local_db_user="importer";
+my $local_db_host="localhost";
+my $local_db_pass="importer";
+
+my $remote_db="billing";
+my $remote_db_user="ext_radius";
+my $remote_db_host="10.0.11.102";
+my $remote_db_pass="ext_radius";
+
+my $opt_c=0;
+
+if(scalar(@ARGV) > 0 && $ARGV[0] eq '-c') {
+  $opt_c=1;
+};
+
+our $rdbh;
+our $dbh;
+
+sub error_exit {
+  if(defined($rdbh)) {
+    $rdbh->disconnect();
+    $rdbh=undef;
+  };
+
+  if(defined($dbh)) {
+    $dbh->disconnect();
+    $dbh=undef;
+  };
+
+  my $err_text=shift;
+  die scalar(localtime())." $err_text\n";
+};
+
+my $rdbh=DBI->connect("DBI:mysql:database=$remote_db;host=$remote_db_host", $remote_db_user, $remote_db_pass, { PrintWarn => 0, PrintError => 0, RaiseError => 0, mysql_enable_utf8 => 1} );
+
+if(!defined($rdbh)) {
+  error_exit("Remote DB Connect error");
+};
+
+#$rdbh->do('set names utf8', { RaiseError => 0 });
+
+
+my $query;
+$query =  "SELECT vg.login, vg.pass as password, t.shape as t_shape, vg.shape as u_shape";
+$query .= ", IFNULL(GROUP_CONCAT(INET_NTOA(BIN2IPV4(st.segment)) ORDER BY st.segment), '') as ips, vg.blocked as bill_state";
+$query .= ", vg.vg_id as vg_id";
+$query .= ", vg.uid as uid";
+$query .= ", a.number as anumber, s.id as agent";
+$query .= ", IFNULL((SELECT str_value FROM vgroups_addons_vals vv WHERE vv.vg_id=vg.vg_id AND vv.name='scat_ips'), '') as scat_ips";
+$query .= ", IFNULL((SELECT str_value FROM vgroups_addons_vals vv WHERE vv.vg_id=vg.vg_id AND vv.name='scat_login'), '') as scat_login";
+$query .= ", IFNULL((SELECT str_value FROM vgroups_addons_vals vv WHERE vv.vg_id=vg.vg_id AND vv.name='scat_svc'), '') as scat_svc";
+$query .= ", (SELECT name FROM accounts WHERE accounts.uid=a.uid) as name";
+$query .= ", IFNULL((SELECT address FROM accounts_addr WHERE accounts_addr.uid=a.uid AND type=1), IFNULL((SELECT address FROM accounts_addr WHERE accounts_addr.uid=a.uid AND type=0), '')) as address";
+$query .= " FROM (((";
+$query .= " vgroups vg INNER JOIN settings s ON s.id=vg.id";
+$query .= ") INNER JOIN agreements a ON vg.agrm_id=a.agrm_id";
+$query .= ") INNER JOIN tarifs t ON vg.tar_id=t.tar_id";
+$query .= ") LEFT JOIN staff st ON vg.vg_id=st.vg_id";
+$query .= " WHERE 1";
+$query .= " AND vg.archive=0";
+$query .= " AND a.archive=0";
+$query .= " AND s.archive=0";
+$query .= " AND s.service_name IN ('PPPoE','IPoE')";
+$query .= " AND a.number IS NOT NULL";
+$query .= " AND a.number NOT REGEXP '^ *\$'";
+$query .= " GROUP BY vg.vg_id";
+
+
+my $rqres=$rdbh->selectall_hashref($query, 'vg_id');
+
+if($rdbh->err) {
+  error_exit("Remote request error: ".$rdbh->errstr);
+};
+
+$query="SELECT person_id as id, login, pass as password, fio as name FROM managers WHERE archive=0 AND login IS NOT NULL AND payments=0 AND template=0";
+
+my $rusers=$rdbh->selectall_hashref($query, 'id');
+
+if($rdbh->err) {
+  error_exit("Remote request error: ".$rdbh->errstr);
+};
+
+$rdbh->disconnect();
+$rdbh=undef;
+
+if(ref($rqres) ne "HASH") {
+  error_exit("Remote query returned non-hash");
+};
+
+if(scalar(keys(%$rqres)) < 1000) {
+  error_exit("Too few records returned from remote DB");
+};
+
+#print(Dumper($rqres));
+
+#foreach my $vg_id (sort(keys(%$rqres))) {
+#  print(${$rqres}{$vg_id}{'name'}."\n");
+#};
+
+my $dbh=DBI->connect("DBI:mysql:database=$local_db;host=$local_db_host", $local_db_user, $local_db_pass, { PrintWarn => 0, PrintError => 0, RaiseError => 0, mysql_enable_utf8 => 1} );
+
+if(!defined($dbh)) {
+  error_exit("Remote DB Connect error");
+};
+
+$query="SELECT * FROM us";
+my $qres=$dbh->selectall_hashref($query, 'u_vg_id');
+
+if($dbh->err) {
+  error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+};
+
+if(ref($qres) ne "HASH") {
+  error_exit("Remote query returned non-hash");
+};
+
+$query="SELECT * FROM users";
+my $lusers=$dbh->selectall_hashref($query, 'user_id');
+if($dbh->err) {
+  error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+};
+
+my $deleted=0;
+my $updated=0;
+my $added=0;
+
+my @change_log;
+
+my @check_fields=('bill_state', 'login', 'password', 'agent', 'speed', 'name', 'anumber', 'ips', 'scat_login', 'scat_ips', 'address', 'scat_svc', 'uid');
+
+foreach my $vg_id (keys(%$qres)) {
+  if(!defined(${$rqres}{$vg_id})) {
+    # login gone
+    if(${$qres}{$vg_id}{'u_bill_state'} < 100 && !${$qres}{$vg_id}{'u_local'}) {
+      $deleted++;
+      push(@change_log, "Deleted: vg_id: $vg_id, agent: ${$qres}{$vg_id}{'u_agent'}, anumber: ${$qres}{$vg_id}{'u_anumber'}, login: ${$qres}{$vg_id}{'u_login'}, name: ${$qres}{$vg_id}{'u_name'}");
+    };
+  } else {
+    my $speed=${$rqres}{$vg_id}{'t_shape'};
+    if(${$rqres}{$vg_id}{'u_shape'} != 0) {
+      $speed=${$rqres}{$vg_id}{'u_shape'};
+    };
+    ${$rqres}{$vg_id}{'speed'}=$speed;
+
+    my @changed_fields=();
+    foreach my $field (@check_fields) {
+      if(${$qres}{$vg_id}{"u_$field"} ne ${$rqres}{$vg_id}{$field}) {
+        push(@changed_fields, $field);
+      };
+    };
+
+    if(scalar(@changed_fields)) {
+      if(!${$qres}{$vg_id}{'u_local'}) {
+        $updated++;
+        my $update_str="Updated vg_id: $vg_id, agent: ${$rqres}{$vg_id}{'agent'}, anumber: ${$rqres}{$vg_id}{'anumber'}, login: ${$rqres}{$vg_id}{'login'}, name: ${$rqres}{$vg_id}{'name'}";
+        foreach my $field (sort(@changed_fields)) {
+          $update_str .= "\n\t$field: ".${$qres}{$vg_id}{"u_$field"}." => ${$rqres}{$vg_id}{$field}";
+        };
+        push(@change_log, $update_str);
+      };
+    };
+  };
+};
+
+foreach my $vg_id (keys(%$rqres)) {
+  if(!defined(${$qres}{$vg_id})) {
+    # login appeared
+    my $speed=${$rqres}{$vg_id}{'t_shape'};
+    if(${$rqres}{$vg_id}{'u_shape'} != 0) {
+      $speed=${$rqres}{$vg_id}{'u_shape'};
+    };
+    ${$rqres}{$vg_id}{'speed'}=$speed;
+
+    $added++;
+    push(@change_log, "Added: vg_id: $vg_id, agent: ${$rqres}{$vg_id}{'agent'}, anumber: ${$rqres}{$vg_id}{'anumber'}, login: ${$rqres}{$vg_id}{'login'}, name: ${$rqres}{$vg_id}{'name'}");
+  };
+};
+
+################# managers
+
+my @manager_fields=('login', 'password', 'name');
+
+foreach my $user_id (keys(%$lusers)) {
+  if(!defined(${$rusers}{$user_id})) {
+    # manager gone
+    if(1) {
+      $deleted++;
+      push(@change_log, "Deleted manager: login ${$lusers}{$user_id}{'user_login'}, name: ${$lusers}{$user_id}{'user_name'}");
+    };
+  } else {
+    my @changed_fields=();
+    my $pass_changed=0;
+    foreach my $field (@manager_fields) {
+      if(${$lusers}{$user_id}{"user_$field"} ne ${$rusers}{$user_id}{$field}) {
+        push(@changed_fields, $field);
+        if($field eq 'password') { $pass_changed=1; };
+      };
+    };
+
+    if(scalar(@changed_fields)) {
+      if(1) {
+        $updated++;
+        my $update_str="Updated manager; login: ${$rusers}{$user_id}{'login'}, name: ${$rusers}{$user_id}{'name'}";
+        foreach my $field (sort(@changed_fields)) {
+          $update_str .= "\n\t$field: ".${$lusers}{$user_id}{"u_$field"}." => ${$rusers}{$user_id}{$field}";
+        };
+        push(@change_log, $update_str);
+      };
+    };
+  };
+};
+
+foreach my $user_id (keys(%$rusers)) {
+  if(!defined(${$lusers}{$user_id})) {
+    # manager appeared
+
+    $added++;
+    push(@change_log, "Added manager: login: ${$rusers}{$user_id}{'login'}, name: ${$rusers}{$user_id}{'name'}");
+  };
+};
+
+$dbh->disconnect();
+
+if($deleted || $updated || $added) {
+  print(scalar(localtime())." Added: $added, Updated: $updated, Deleted: $deleted\n");
+  if(scalar(@change_log) < 100) {
+    foreach my $line (@change_log) {
+      print(scalar(localtime())." $line\n");
+    };
+  } else {
+    print(scalar(localtime())." WARNING!!! MASS UPDATE\n");
+  };
+};
+__DATA__

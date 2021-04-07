@@ -1,0 +1,121 @@
+aaa group server radius ext_radius
+ server-private 10.0.11.71 auth-port 1812 acct-port 1813 key 0 secret
+ ip vrf forwarding Mgmt-inband
+ ip radius source-interface TenGigabitEthernet0/1/0.11
+!
+
+aaa authentication ppp EXT_RADIUS group ext_radius
+aaa authorization network EXT_RADIUS group ext_radius
+aaa authorization configuration EXT_RADIUS group ext_radius
+aaa authorization subscriber-service EXT_RADIUS local group ext_radius
+aaa accounting network EXT_RADIUS start-stop group ext_radius
+
+aaa server radius dynamic-author
+ client 10.0.11.71 vrf Mgmt-inband server-key 0 secret
+!
+
+policy-map type control IPoE_EXT_RADIUS
+ class type control CM_C_IPoE_RTIMEOUT_REAUTH event timed-policy-expiry
+  1 service disconnect
+ !
+ class type control CM_C_IPoE_REJECT_REAUTH event timed-policy-expiry
+  1 service disconnect
+ !
+ class type control always event session-start
+  10 authorize aaa list EXT_RADIUS password ciscoo identifier source-ip-address
+  20 set-timer IPoE_REJECT_REAUTH 1
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  34 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  40 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  50 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+ class type control always event service-stop
+  1 service-policy type service unapply identifier service-name
+ !
+ class type control always event session-restart
+  10 authorize aaa list EXT_RADIUS password ciscoo identifier source-ip-address
+  20 set-timer IPoE_REJECT_REAUTH 1
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  34 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  40 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  50 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+ class type control always event radius-timeout
+  1 set-timer IPoE_RTIMEOUT_REAUTH 1
+  10 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  14 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  20 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+!
+
+policy-map type control IPoE_Interface_EXT_RADIUS
+ class type control CM_C_IPoE_RTIMEOUT_REAUTH event timed-policy-expiry
+  1 service disconnect
+ !
+ class type control CM_C_IPoE_REJECT_REAUTH event timed-policy-expiry
+  1 service disconnect
+ !
+ class type control always event session-start
+  10 authorize aaa list EXT_RADIUS password ciscoo identifier nas-port
+  20 set-timer IPoE_REJECT_REAUTH 1
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  34 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  40 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  50 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+ class type control always event service-stop
+  1 service-policy type service unapply identifier service-name
+ !
+ class type control always event session-restart
+  10 authorize aaa list EXT_RADIUS password ciscoo identifier nas-port
+  20 set-timer IPoE_REJECT_REAUTH 1
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  34 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  40 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  50 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+ class type control always event radius-timeout
+  1 set-timer IPoE_RTIMEOUT_REAUTH 1
+  10 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  14 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  20 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+!
+
+policy-map type control IPoE_Auto_EXT_RADIUS
+ class type control CM_C_IPoE_RTIMEOUT_REAUTH event timed-policy-expiry
+  1 service disconnect
+ !
+ class type control CM_C_IPoE_REJECT_REAUTH event timed-policy-expiry
+  1 service disconnect
+ !
+ class type control always event session-start
+  10 authorize aaa list EXT_RADIUS password ciscoo identifier auto-detect
+  20 set-timer IPoE_REJECT_REAUTH 1
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  34 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  40 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  50 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+ class type control always event service-stop
+  1 service-policy type service unapply identifier service-name
+ !
+ class type control always event session-restart
+  10 authorize aaa list EXT_RADIUS password ciscoo identifier auto-detect
+  20 set-timer IPoE_REJECT_REAUTH 1
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  34 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  40 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  50 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+ class type control always event radius-timeout
+  1 set-timer IPoE_RTIMEOUT_REAUTH 1
+  10 service-policy type service aaa list EXT_RADIUS name NoMoney10
+  14 service-policy type service aaa list EXT_RADIUS name NoMoney400
+  20 service-policy type service aaa list EXT_RADIUS name NoMoney500
+  30 service-policy type service aaa list EXT_RADIUS name NoMoney510
+ !
+!
+
