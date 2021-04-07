@@ -1,0 +1,82 @@
+server default {
+listen {
+        type = auth
+        ipaddr = *
+        port = 0
+        limit {
+              max_connections = 16
+              lifetime = 0
+              idle_timeout = 30
+        }
+}
+listen {
+        type = acct
+        ipaddr = *
+        port = 0
+        limit {
+        }
+}
+authorize {
+        eap {
+                ok = return
+        }
+        chap
+        mschap
+        perl
+        pap
+        if (ok || updated) {
+          update control {
+              Auth-Type := Perl
+          }
+        }
+}
+authenticate {
+        Auth-Type Perl {
+            perl
+        }
+        Auth-Type PAP {
+                pap
+        }
+        Auth-Type CHAP {
+                chap
+        }
+        Auth-Type MS-CHAP {
+                mschap
+        }
+        mschap
+        digest
+        eap
+}
+preacct {
+        preprocess
+        acct_unique
+        suffix
+}
+accounting {
+        attr_filter.accounting_response
+        perl
+}
+session {
+}
+post-auth {
+        update {
+                &reply: += &session-state:
+        }
+        perl
+        remove_reply_message_if_eap
+        Post-Auth-Type REJECT {
+          perl
+                attr_filter.access_reject
+                eap
+                remove_reply_message_if_eap
+        }
+        Post-Auth-Type Challenge {
+        }
+}
+pre-proxy {
+}
+post-proxy {
+        eap
+}
+}
+
