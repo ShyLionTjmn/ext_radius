@@ -18,6 +18,8 @@ our $REDIRECT_SPEED_MAX=10240;
 our $DB_HOST="localhost";
 our $DB_NAME="radius";
 
+our $REMOTE_DB_HOST="10.0.11.71";
+
 #radiusd db account
 our $DB_USER="radius";
 our $DB_PASS="radius";

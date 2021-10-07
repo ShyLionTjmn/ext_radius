@@ -15,7 +15,7 @@ use radius_options;
 
 # Bring the global hashes into the package scope
 our (%RAD_REQUEST, %RAD_REPLY, %RAD_CHECK, %RAD_STATE, %RAD_CONFIG);
-our ($dbh, $conn_valid, $somestate, $ua);
+our ($dbh, $conn_valid, $somestate);
 
 use constant { true => 1, false => 0 };
 
@@ -99,35 +99,65 @@ sub ip_private {
 };
 
 sub scat {
+  #  my $ua;
   my %form;
   $form{'login'} = shift;
   $form{'op'} = lc($RAD_REQUEST{'Acct-Status-Type'});
   $form{'ips'} = shift;
   $form{'svc'} = shift;
+  $form{'rate'} = shift;
 
   my $login=$RAD_REQUEST{'User-Name'};
   $login =~ s/^ //g;
   $login =~ s/ $//g;
-  if(!defined($ua)) {
-    $ua = LWP::UserAgent->new;
-    $ua->timeout($radius_options::SCAT_TIMEOUT);
-    $ua->protocols_allowed(['http', 'https']);
-  };
+  #if(!defined($ua)) {
+#    $ua = LWP::UserAgent->new;
+#    $ua->timeout($radius_options::SCAT_TIMEOUT);
+#    $ua->protocols_allowed(['http', 'https']);
+  #};
 
   my $ip="";
   if(defined($RAD_REQUEST{'Framed-IP-Address'})) {
     $ip=$RAD_REQUEST{'Framed-IP-Address'};
   };
 
-  $ua->agent("ext-radius/".lc($RAD_REQUEST{'Acct-Status-Type'})." ($login : $ip : ".$form{'login'}." : ".$form{'ips'});
+#  $ua->agent("ext-radius/".lc($RAD_REQUEST{'Acct-Status-Type'})." ($login : $ip : ".$form{'login'}." : ".$form{'ips'});
 
-  my $response=$ua->post($radius_options::SCAT_URI, \%form);
-  if($response->is_success) {
-    return true;
-  } else {
-    &radiusd::radlog(L_ERR, "SCAT request error: ".$response->message);
+  #  my $response=$ua->post($radius_options::SCAT_URI, \%form);
+  #if($response->is_success) {
+  #  return true;
+  #} else {
+  #  &radiusd::radlog(L_ERR, "SCAT request error: ".$response->message);
+  #  &radiusd::radlog(L_ERR, "Login: $login");
+  #  return false;
+  #};
+
+  my $curl_res=system("/usr/bin/curl",
+    "--data-urlencode", "login=".$form{'login'},
+    "--data-urlencode", "op=".$form{'op'},
+    "--data-urlencode", "ips=".$form{'ips'},
+    "--data-urlencode", "svc=".$form{'svc'},
+    "--data-urlencode", "rate=".$form{'rate'},
+    "-m", $radius_options::SCAT_TIMEOUT,
+    "-o", "/dev/null",
+    "-s",
+    "-A", "ext-radius/".lc($RAD_REQUEST{'Acct-Status-Type'})." ($login : $ip : ".$form{'login'}." : ".$form{'ips'}." : ".$form{'rate'},
+    $radius_options::SCAT_URI
+  );
+  if ($? == -1) {
+    &radiusd::radlog(L_ERR, "SCAT curl exec error: $!");
     return false;
+  } elsif ($? & 127) {
+    &radiusd::radlog(L_ERR, "SCAT curl exec died with signal");
+    return false;
+  } else {
+    my $cret=$? >> 8;
+    if($cret > 0) {
+      &radiusd::radlog(L_ERR, "SCAT curl exec returned $cret");
+      return false;
+    };
   };
+  return true;
 };
 
 sub archive_row {
@@ -265,6 +295,24 @@ sub authorize {
   &radiusd::radlog(L_DBG, "Function: ".(caller(0))[3]);
   &log_request_attributes;
 
+  my $login=$RAD_REQUEST{'User-Name'};
+  my $mac="";
+
+  my @CiscoAVPair;
+  if(defined($RAD_REQUEST{'Cisco-AVPair'})) {
+    if(ref($RAD_REQUEST{'Cisco-AVPair'}) eq "ARRAY") {
+      @CiscoAVPair=@{$RAD_REQUEST{'Cisco-AVPair'}};
+    } elsif(ref($RAD_REQUEST{'Cisco-AVPair'}) eq "") {
+      push(@CiscoAVPair, $RAD_REQUEST{'Cisco-AVPair'});
+    };
+  };
+
+  foreach my $av_pair (@CiscoAVPair) {
+    if($av_pair =~ /^client-mac-address=([0-9a-fA-F]{2})[\.:\-]?([0-9a-fA-F]{2})[\.:\-]?([0-9a-fA-F]{2})[\.:\-]?([0-9a-fA-F]{2})[\.:\-]?([0-9a-fA-F]{2})[\.:\-]?([0-9a-fA-F]{2})$/) {
+      $mac=lc($1.$2.$3.$4.$5.$6);
+      last;
+    };
+  };
   my $agent=&get_agent();
 
   if($agent < 0) {
@@ -272,7 +320,7 @@ sub authorize {
     &radiusd::radlog($ATTRS_ERR, "##########");
     &log_request_attributes($ATTRS_ERR);
     &radiusd::radlog($ATTRS_ERR, "##########");
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     return RLM_MODULE_REJECT;
   };
 
@@ -285,14 +333,14 @@ sub authorize {
   my $query="SELECT u_password FROM us WHERE TRIM(u_login)=TRIM(?) AND u_agent=? AND u_bill_state < 10";
   my $qres=$dbh->selectall_arrayref($query, {}, ( $RAD_REQUEST{'User-Name'}, $agent));
   if($dbh->err) {
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     &radiusd::radlog($DB_ERR, "DB error at ".__LINE__.": ".$dbh->errstr);
     return RLM_MODULE_REJECT;
   };
   if(scalar(@$qres) == 0) {
     #user not found, reject
     &radiusd::radlog(L_DBG, "User not found in DB");
-    $RAD_REPLY{'Reply-Message'} = "User not found";
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: User not found";
     return RLM_MODULE_REJECT;
   };
 
@@ -300,7 +348,7 @@ sub authorize {
     #double login in DB - error!
     &radiusd::radlog(L_ERR, "More than one user found in DB!");
     &radiusd::radlog(L_ERR, "Double user: ".$RAD_REQUEST{'User-Name'});
-    $RAD_REPLY{'Reply-Message'} = "Double user";
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Double user";
     return RLM_MODULE_REJECT;
   };
 
@@ -445,7 +493,7 @@ sub post_auth {
     &radiusd::radlog($ATTRS_ERR, "##########");
     &log_request_attributes($ATTRS_ERR);
     &radiusd::radlog($ATTRS_ERR, "##########");
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     return RLM_MODULE_REJECT;
   };
 
@@ -453,14 +501,14 @@ sub post_auth {
   my $query="SELECT * FROM us WHERE TRIM(u_login)=TRIM(?) AND u_agent=? AND u_bill_state < 10";
   my $qres=$dbh->selectall_arrayref($query, { Slice=>{} }, ( $RAD_REQUEST{'User-Name'}, $agent));
   if($dbh->err) {
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     &radiusd::radlog($DB_ERR, "DB error at ".__LINE__.": ".$dbh->errstr);
     return RLM_MODULE_REJECT;
   };
   if(scalar(@$qres) == 0) {
     #user not found, reject
     &radiusd::radlog(L_DBG, "User not found in DB");
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     return RLM_MODULE_REJECT;
   };
 
@@ -468,7 +516,7 @@ sub post_auth {
     #double login in DB - error!
     &radiusd::radlog(L_ERR, "More than one user found in DB!");
     &radiusd::radlog(L_ERR, "Double user: ".$RAD_REQUEST{'User-Name'});
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     return RLM_MODULE_REJECT;
   };
 
@@ -477,7 +525,7 @@ sub post_auth {
   if($user_data{'u_bill_state'} >= 10) {
     #user account is off, reject
     &radiusd::radlog(L_DBG, "User account is off");
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     return RLM_MODULE_REJECT;
   };
 
@@ -574,12 +622,12 @@ sub post_auth {
           $query="SELECT COUNT(s_id) FROM ss WHERE s_ip=?";
           $qres=$dbh->selectall_arrayref($query, {}, $ip);
           if($dbh->err) {
-            $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+            $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
             &radiusd::radlog($DB_ERR, "DB error at ".__LINE__.": ".$dbh->errstr);
             return RLM_MODULE_REJECT;
           };
           if(scalar(@$qres) != 1) {
-            $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+            $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
             &radiusd::radlog($DB_ERR, "Query returned wrong number of rows at ".__LINE__);
             return RLM_MODULE_REJECT;
           };
@@ -591,7 +639,7 @@ sub post_auth {
         };
       };
       if(! $found) {
-        $RAD_REPLY{'Reply-Message'} = "Reject.No free IPs";
+        $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.No free IPs";
         &radiusd::radlog(L_DBG, "No free IP at ".__LINE__);
         return RLM_MODULE_REJECT;
       };
@@ -639,10 +687,11 @@ sub post_auth {
   ));
   if($dbh->err) {
     &radiusd::radlog($DB_ERR, "DB error at ".__LINE__.": ".$dbh->errstr);
-    $RAD_REPLY{'Reply-Message'} = "Reject.Service Error at ".__LINE__;
+    $RAD_REPLY{'Reply-Message'} = "$login/$mac: Reject.Service Error at ".__LINE__;
     return RLM_MODULE_REJECT;
   };
 
+  $RAD_REPLY{'Reply-Message'} = "$login/$mac: Accept";
   return RLM_MODULE_OK;
 }
 
@@ -774,8 +823,8 @@ sub accounting {
     };
   };
 
-  my $query="SELECT * FROM ss WHERE s_acct_ses_id=? AND s_nas_ip=?";
-  my $srow=$dbh->selectall_arrayref($query, { Slice => {} }, ($RAD_REQUEST{'Acct-Session-Id'}, $RAD_REQUEST{'NAS-IP-Address'}));
+  my $query="SELECT * FROM ss WHERE s_acct_ses_id=? AND s_nas_ip=? AND s_login=?";
+  my $srow=$dbh->selectall_arrayref($query, { Slice => {} }, ($RAD_REQUEST{'Acct-Session-Id'}, $RAD_REQUEST{'NAS-IP-Address'}, $login));
   if($dbh->err) {
     &radiusd::radlog($DB_ERR, "DB error at ".__LINE__.": ".$dbh->errstr);
     return RLM_MODULE_INVALID;
@@ -1034,7 +1083,7 @@ sub accounting {
     };
 
     if($ips ne "") {
-      if(! &scat($Vslogin."_".$acct_ses_id, $ips, $Vssvc)) {
+      if(! &scat($Vslogin."_".$acct_ses_id, $ips, $Vssvc, $Vspeed * 1024)) {
         return RLM_MODULE_INVALID;
       };
     };

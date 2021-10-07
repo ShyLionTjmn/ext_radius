@@ -1,6 +1,8 @@
 #!/bin/sh
 
-mysqldump --no-data --compact -uradius -pradius radius | sed 's/ AUTO_INCREMENT=[0-9]*//g' > /tmp/local_radius_db
+TABLES=`mysql -uradius -pradius radius -NB -e 'show tables' | grep -v "^history_2\|^auth_hist2\|^rad" | tr '\n' ' '`
+
+mysqldump --no-data --compact -uradius -pradius radius $TABLES | sed 's/ AUTO_INCREMENT=[0-9]*//g' > /tmp/local_radius_db
 if [ $? -ne 0 ]
 then
   echo "Error getting local db"
@@ -8,7 +10,7 @@ then
 fi
 
 
-ssh 10.0.11.72 "mysqldump --no-data --compact -uradius -pradius radius" | sed 's/ AUTO_INCREMENT=[0-9]*//g' > /tmp/remote_radius_db
+ssh 10.0.11.72 "mysqldump --no-data --compact -uradius -pradius radius $TABLES" | sed 's/ AUTO_INCREMENT=[0-9]*//g' > /tmp/remote_radius_db
 if [ $? -ne 0 ]
 then
   echo "Error getting remote db"

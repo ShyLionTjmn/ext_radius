@@ -32,9 +32,20 @@ my $remote_db_host="10.0.11.102";
 my $remote_db_pass="ext_radius";
 
 my $opt_c=0;
+my $opt_d=0;
+my $opt_v=0;
 
-if(scalar(@ARGV) > 0 && $ARGV[0] eq '-c') {
-  $opt_c=1;
+while(my $opt=shift(@ARGV)) {
+  if($opt eq '-c') {
+    $opt_c=1;
+  } elsif($opt eq '-d') {
+    $opt_d=1;
+  } elsif($opt eq '-v') {
+    $opt_v=1;
+  } elsif($opt eq '-h' || $opt eq '--help') {
+    print("USAGE: $0 [-c] [-d]\n\t-c\tfor cron job, no debug output on errors\n\t-d\treally make changes in DB\n");
+    exit;
+  };
 };
 
 our $rdbh;
@@ -54,6 +65,10 @@ sub error_exit {
 
   my $err_text=shift;
   die scalar(localtime())." $err_text\n";
+};
+
+if(!$opt_d) {
+  print("!!!! READ ONLY MODE !!!!\n\n");
 };
 
 my $rdbh=DBI->connect("DBI:mysql:database=$remote_db;host=$remote_db_host", $remote_db_user, $remote_db_pass, { PrintWarn => 0, PrintError => 0, RaiseError => 0, mysql_enable_utf8 => 1} );
@@ -159,10 +174,12 @@ foreach my $vg_id (keys(%$qres)) {
   if(!defined(${$rqres}{$vg_id})) {
     # login gone
     if(${$qres}{$vg_id}{'u_bill_state'} < 100 && !${$qres}{$vg_id}{'u_local'}) {
-      $query="UPDATE us SET u_bill_state=100, u_updated=? WHERE u_vg_id=?";
-      $dbh->do($query, {}, (time(), $vg_id));
-      if($dbh->err) {
-        error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+      if($opt_d) {
+        $query="UPDATE us SET u_bill_state=100, u_updated=? WHERE u_vg_id=?";
+        $dbh->do($query, {}, (time(), $vg_id));
+        if($dbh->err) {
+          error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+        };
       };
       $deleted++;
       push(@change_log, "Deleted: vg_id: $vg_id, agent: ${$qres}{$vg_id}{'u_agent'}, anumber: ${$qres}{$vg_id}{'u_anumber'}, login: ${$qres}{$vg_id}{'u_login'}, name: ${$qres}{$vg_id}{'u_name'}");
@@ -183,24 +200,26 @@ foreach my $vg_id (keys(%$qres)) {
 
     if(scalar(@changed_fields)) {
       if(!${$qres}{$vg_id}{'u_local'}) {
-        $query="UPDATE us SET u_login=?, u_password=?, u_agent=?, u_speed=?, u_name=?, u_anumber=?, u_ips=?, u_scat_ips=?, u_scat_login=?, u_scat_svc=?, u_bill_state=?, u_updated=?";
-        $query .= ", u_address=?, u_uid=?";
-        $query .= " WHERE u_vg_id=?";
-        $dbh->do($query, {}, (
-            ${$rqres}{$vg_id}{'login'}, ${$rqres}{$vg_id}{'password'}, ${$rqres}{$vg_id}{'agent'}, $speed, ${$rqres}{$vg_id}{'name'}, ${$rqres}{$vg_id}{'anumber'},
-            ${$rqres}{$vg_id}{'ips'}, ${$rqres}{$vg_id}{'scat_ips'}, ${$rqres}{$vg_id}{'scat_login'}, ${$rqres}{$vg_id}{'scat_svc'}, ${$rqres}{$vg_id}{'bill_state'},
-            time(),
-            ${$rqres}{$vg_id}{'address'},  ${$rqres}{$vg_id}{'uid'},
-            $vg_id)
-        );
-        if($dbh->err) {
-          if(! $opt_c) {
-            print("Remote:\n");
-            print(Dumper(${$rqres}{$vg_id}));
-            print("Local\n");
-            print(Dumper(${$qres}{$vg_id}));
+        if($opt_d) {
+          $query="UPDATE us SET u_login=?, u_password=?, u_agent=?, u_speed=?, u_name=?, u_anumber=?, u_ips=?, u_scat_ips=?, u_scat_login=?, u_scat_svc=?, u_bill_state=?, u_updated=?";
+          $query .= ", u_address=?, u_uid=?";
+          $query .= " WHERE u_vg_id=?";
+          $dbh->do($query, {}, (
+              ${$rqres}{$vg_id}{'login'}, ${$rqres}{$vg_id}{'password'}, ${$rqres}{$vg_id}{'agent'}, $speed, ${$rqres}{$vg_id}{'name'}, ${$rqres}{$vg_id}{'anumber'},
+              ${$rqres}{$vg_id}{'ips'}, ${$rqres}{$vg_id}{'scat_ips'}, ${$rqres}{$vg_id}{'scat_login'}, ${$rqres}{$vg_id}{'scat_svc'}, ${$rqres}{$vg_id}{'bill_state'},
+              time(),
+              ${$rqres}{$vg_id}{'address'},  ${$rqres}{$vg_id}{'uid'},
+              $vg_id)
+          );
+          if($dbh->err) {
+            if(! $opt_c) {
+              print("Remote:\n");
+              print(Dumper(${$rqres}{$vg_id}));
+              print("Local\n");
+              print(Dumper(${$qres}{$vg_id}));
+            };
+            error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
           };
-          error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
         };
         $updated++;
         my $update_str="Updated vg_id: $vg_id, agent: ${$rqres}{$vg_id}{'agent'}, anumber: ${$rqres}{$vg_id}{'anumber'}, login: ${$rqres}{$vg_id}{'login'}, name: ${$rqres}{$vg_id}{'name'}";
@@ -222,19 +241,21 @@ foreach my $vg_id (keys(%$rqres)) {
     };
     ${$rqres}{$vg_id}{'speed'}=$speed;
 
-    $query="INSERT INTO us SET u_login=?, u_password=?, u_agent=?, u_speed=?, u_name=?, u_anumber=?, u_ips=?, u_scat_ips=?, u_scat_login=?, u_scat_svc=?, u_bill_state=?, u_updated=?";
-    $query .= ", u_vg_id=?, u_added=?, u_address=?, u_uid=?";
-    $dbh->do($query, {}, (
-        ${$rqres}{$vg_id}{'login'}, ${$rqres}{$vg_id}{'password'}, ${$rqres}{$vg_id}{'agent'}, ${$rqres}{$vg_id}{'speed'}, ${$rqres}{$vg_id}{'name'}, ${$rqres}{$vg_id}{'anumber'},
-        ${$rqres}{$vg_id}{'ips'}, ${$rqres}{$vg_id}{'scat_ips'}, ${$rqres}{$vg_id}{'scat_login'}, ${$rqres}{$vg_id}{'scat_svc'}, ${$rqres}{$vg_id}{'bill_state'},
-        time(), $vg_id, time(), ${$rqres}{$vg_id}{'address'}, ${$rqres}{$vg_id}{'uid'})
-    );
-    if($dbh->err) {
-      if(! $opt_c) {
-        print("Remote:\n");
-        print(Dumper(${$rqres}{$vg_id}));
+    if($opt_d) {
+      $query="INSERT INTO us SET u_login=?, u_password=?, u_agent=?, u_speed=?, u_name=?, u_anumber=?, u_ips=?, u_scat_ips=?, u_scat_login=?, u_scat_svc=?, u_bill_state=?, u_updated=?";
+      $query .= ", u_vg_id=?, u_added=?, u_address=?, u_uid=?";
+      $dbh->do($query, {}, (
+          ${$rqres}{$vg_id}{'login'}, ${$rqres}{$vg_id}{'password'}, ${$rqres}{$vg_id}{'agent'}, ${$rqres}{$vg_id}{'speed'}, ${$rqres}{$vg_id}{'name'}, ${$rqres}{$vg_id}{'anumber'},
+          ${$rqres}{$vg_id}{'ips'}, ${$rqres}{$vg_id}{'scat_ips'}, ${$rqres}{$vg_id}{'scat_login'}, ${$rqres}{$vg_id}{'scat_svc'}, ${$rqres}{$vg_id}{'bill_state'},
+          time(), $vg_id, time(), ${$rqres}{$vg_id}{'address'}, ${$rqres}{$vg_id}{'uid'})
+      );
+      if($dbh->err) {
+        if(! $opt_c) {
+          print("Remote:\n");
+          print(Dumper(${$rqres}{$vg_id}));
+        };
+        error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
       };
-      error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
     };
     $added++;
     push(@change_log, "Added: vg_id: $vg_id, agent: ${$rqres}{$vg_id}{'agent'}, anumber: ${$rqres}{$vg_id}{'anumber'}, login: ${$rqres}{$vg_id}{'login'}, name: ${$rqres}{$vg_id}{'name'}");
@@ -249,10 +270,12 @@ foreach my $user_id (keys(%$lusers)) {
   if(!defined(${$rusers}{$user_id})) {
     # manager gone
     if(${$lusers}{$user_id}{'user_deleted'} == 0) {
-      $query="UPDATE users SET user_deleted=? WHERE user_id=?";
-      $dbh->do($query, {}, (time(), $user_id));
-      if($dbh->err) {
-        error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+      if($opt_d) {
+        $query="UPDATE users SET user_deleted=? WHERE user_id=?";
+        $dbh->do($query, {}, (time(), $user_id));
+        if($dbh->err) {
+          error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+        };
       };
       $deleted++;
       push(@change_log, "Deleted manager: login ${$lusers}{$user_id}{'user_login'}, name: ${$lusers}{$user_id}{'user_name'}");
@@ -269,20 +292,22 @@ foreach my $user_id (keys(%$lusers)) {
 
     if(scalar(@changed_fields)) {
       if(1) {
-        $query="UPDATE users SET user_login=?, user_password=?, user_name=?";
-        if($pass_changed) {
-          $query .= ", user_password_count=user_password_count+1";
-        };
-        $query .= " WHERE user_id=?";
-        $dbh->do($query, {}, (${$rusers}{$user_id}{'login'}, ${$rusers}{$user_id}{'password'}, ${$rusers}{$user_id}{'name'}, $user_id));
-        if($dbh->err) {
-          if(! $opt_c) {
-            print("Remote:\n");
-            print(Dumper(${$rusers}{$user_id}));
-            print("Local\n");
-            print(Dumper(${$lusers}{$user_id}));
+        if($opt_d) {
+          $query="UPDATE users SET user_login=?, user_password=?, user_name=?";
+          if($pass_changed) {
+            $query .= ", user_password_count=user_password_count+1";
           };
-          error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+          $query .= " WHERE user_id=?";
+          $dbh->do($query, {}, (${$rusers}{$user_id}{'login'}, ${$rusers}{$user_id}{'password'}, ${$rusers}{$user_id}{'name'}, $user_id));
+          if($dbh->err) {
+            if(! $opt_c) {
+              print("Remote:\n");
+              print(Dumper(${$rusers}{$user_id}));
+              print("Local\n");
+              print(Dumper(${$lusers}{$user_id}));
+            };
+            error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
+          };
         };
         $updated++;
         my $update_str="Updated manager; login: ${$rusers}{$user_id}{'login'}, name: ${$rusers}{$user_id}{'name'}";
@@ -299,17 +324,19 @@ foreach my $user_id (keys(%$rusers)) {
   if(!defined(${$lusers}{$user_id})) {
     # manager appeared
 
-    $query="INSERT INTO users SET user_id=?, user_login=?, user_password=?, user_password_count=0, user_rights='R_SUPER', user_name=?, user_last_login=0, user_last_activity=0";
-    $query .= ", user_blocked=0, user_block_reason='', user_deleted=0, ts=?";
+    if($opt_d) {
+      $query="INSERT INTO users SET user_id=?, user_login=?, user_password=?, user_password_count=0, user_rights='R_SUPER', user_name=?, user_last_login=0, user_last_activity=0";
+      $query .= ", user_blocked=0, user_block_reason='', user_deleted=0, ts=?";
 
-    $dbh->do($query, {}, ( $user_id, ${$rusers}{$user_id}{'login'}, ${$rusers}{$user_id}{'password'}, ${$rusers}{$user_id}{'name'}, time()) );
+      $dbh->do($query, {}, ( $user_id, ${$rusers}{$user_id}{'login'}, ${$rusers}{$user_id}{'password'}, ${$rusers}{$user_id}{'name'}, time()) );
 
-    if($dbh->err) {
-      if(! $opt_c) {
-        print("Remote:\n");
-        print(Dumper(${$rusers}{$user_id}));
+      if($dbh->err) {
+        if(! $opt_c) {
+          print("Remote:\n");
+          print(Dumper(${$rusers}{$user_id}));
+        };
+        error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
       };
-      error_exit("Local request error at ".__LINE__.": ".$dbh->errstr);
     };
     $added++;
     push(@change_log, "Added manager: login: ${$rusers}{$user_id}{'login'}, name: ${$rusers}{$user_id}{'name'}");
@@ -351,10 +378,12 @@ foreach my $row (@$ahlist) {
   my $table=${$row}[0];
   if($table ne $today_auth_hist && $table ne $yesterday_auth_hist && $table =~ /^auth_hist\d{8}$/) {
     print("drop table $table\n");
-    $query="DROP VIEW $table";
-    $dbh->do($query);
-    if($dbh->err) {
-      error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+    if($opt_d) {
+      $query="DROP VIEW $table";
+      $dbh->do($query);
+      if($dbh->err) {
+        error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+      };
     };
   };
 };
@@ -372,66 +401,71 @@ foreach my $row (@$tlist) {
   my $table=${$row}[0];
   if($table ne $today_rad && $table ne $yesterday_rad && $table =~ /^rad001\d{8}$/) {
     print("drop table $table\n");
-    $query="DROP VIEW $table";
-    $dbh->do($query);
-    if($dbh->err) {
-      error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+    if($opt_d) {
+      $query="DROP VIEW $table";
+      $dbh->do($query);
+      if($dbh->err) {
+        error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+      };
     };
   };
 };
 
-$query="CREATE TABLE IF NOT EXISTS $hist_table LIKE history_template";
-$dbh->do($query);
-if($dbh->err) {
-  error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+if($opt_d) {
+  $query="CREATE TABLE IF NOT EXISTS $hist_table LIKE history_template";
+  $dbh->do($query);
+  if($dbh->err) {
+    error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+  };
+
+
+  $query="CREATE VIEW IF NOT EXISTS $today_rad AS SELECT
+      h_vg_id as vg_id
+     ,FROM_UNIXTIME(h_stop) as timeto
+     ,FROM_UNIXTIME(h_start) as timefrom
+     ,h_mac as ani
+     ,UNHEX(LPAD(HEX(INET_ATON(h_ip) | 0xFFFF00000000), 32,0)) as ip
+     ,h_bytes_in as cin
+     ,h_bytes_out as cout
+    FROM $hist_table
+    WHERE
+      h_stop > $hist_start
+      AND h_stop > 0
+      AND h_auth > 0
+      AND h_start > 0
+      AND h_ip <> ''
+  ";
+
+  $dbh->do($query);
+  if($dbh->err) {
+    error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+  };
+
+  $query="CREATE VIEW IF NOT EXISTS $today_auth_hist AS SELECT
+     h_vg_id as vg_id
+     ,UNHEX(LPAD(HEX(INET_ATON(h_ip) | 0xFFFF00000000), 32,0)) as ip
+     ,h_mac as mc
+    FROM $hist_table
+    WHERE
+     h_auth > $hist_start
+     AND h_ip <> ''
+  ";
+
+  $dbh->do($query);
+  if($dbh->err) {
+    error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+  };
 };
 
-
-$query="CREATE VIEW IF NOT EXISTS $today_rad AS SELECT
-    h_vg_id as vg_id
-   ,FROM_UNIXTIME(h_stop) as timeto
-   ,FROM_UNIXTIME(h_start) as timefrom
-   ,h_mac as ani
-   ,UNHEX(LPAD(HEX(INET_ATON(h_ip) | 0xFFFF00000000), 32,0)) as ip
-   ,h_bytes_in as cin
-   ,h_bytes_out as cout
-  FROM $hist_table
-  WHERE
-    h_stop > $hist_start
-    AND h_stop > 0
-    AND h_auth > 0
-    AND h_start > 0
-    AND h_ip <> ''
-";
-
-$dbh->do($query);
-if($dbh->err) {
-  error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
+if($opt_d) {
+  $dbh->commit();
 };
 
-$query="CREATE VIEW IF NOT EXISTS $today_auth_hist AS SELECT
-   h_vg_id as vg_id
-   ,UNHEX(LPAD(HEX(INET_ATON(h_ip) | 0xFFFF00000000), 32,0)) as ip
-   ,h_mac as mc
-  FROM $hist_table
-  WHERE
-   h_auth > $hist_start
-   AND h_ip <> ''
-";
-
-$dbh->do($query);
-if($dbh->err) {
-  error_exit("Request error at ".__LINE__.": ".$dbh->errstr);
-};
-
-
-
-$dbh->commit();
 $dbh->disconnect();
 
 if($deleted || $updated || $added) {
   print(scalar(localtime())." Added: $added, Updated: $updated, Deleted: $deleted\n");
-  if(scalar(@change_log) < 100) {
+  if((scalar(@change_log) < 100) || $opt_v) {
     foreach my $line (@change_log) {
       print(scalar(localtime())." $line\n");
     };
@@ -439,4 +473,9 @@ if($deleted || $updated || $added) {
     print(scalar(localtime())." WARNING!!! MASS UPDATE\n");
   };
 };
+
+if(!$opt_d) {
+  print("!!!! READ ONLY MODE !!!!\n");
+};
+
 __DATA__

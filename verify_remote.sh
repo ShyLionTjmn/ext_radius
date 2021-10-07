@@ -1,6 +1,8 @@
 #!/bin/sh
 
-db_sum=`mysqldump --no-data --compact -uradius -pradius radius | sed 's/ AUTO_INCREMENT=[0-9]*//g' | md5sum`
+TABLES=`mysql -uradius -pradius radius -NB -e 'show tables' | grep -v "^history_2\|^auth_hist2\|^rad" | tr '\n' ' '`
+
+db_sum=`mysqldump --no-data --compact -uradius -pradius radius $TABLES | sed 's/ AUTO_INCREMENT=[0-9]*//g' | md5sum`
 if [ $? -ne 0 ]
 then
   echo "Error getting db_sum"
@@ -8,7 +10,7 @@ then
 fi
 
 
-rdb_sum=`ssh 10.0.11.72 "mysqldump --no-data --compact -uradius -pradius radius" | sed 's/ AUTO_INCREMENT=[0-9]*//g' | md5sum`
+rdb_sum=`ssh 10.0.11.72 "mysqldump --no-data --compact -uradius -pradius radius $TABLES" | sed 's/ AUTO_INCREMENT=[0-9]*//g' | md5sum`
 if [ $? -ne 0 ]
 then
   echo "Error getting db_sum"
@@ -24,7 +26,7 @@ fi
 
 echo -n "/opt/ext_radius/etc/radius_options.pm"
 
-opt_sum=`cat /opt/ext_radius/etc/radius_options.pm | grep -v 'THIS=' | md5sum`
+opt_sum=`cat /opt/ext_radius/etc/radius_options.pm | grep -v 'THIS=\|REMOTE_DB_HOST' | md5sum`
 if [ $? -ne 0 ]
 then
   echo
@@ -32,7 +34,7 @@ then
   exit 1
 fi
 
-opt_rsum=`ssh 10.0.11.72 "cat /opt/ext_radius/etc/radius_options.pm | grep -v 'THIS=' | md5sum"`
+opt_rsum=`ssh 10.0.11.72 "cat /opt/ext_radius/etc/radius_options.pm | grep -v 'THIS=\|REMOTE_DB_HOST' | md5sum"`
 if [ $? -ne 0 ]
 then
   echo

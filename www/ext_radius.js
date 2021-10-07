@@ -257,7 +257,7 @@ function ses_row(s_id) {
    .append( $(TD)
      .append( $(LABEL).text(from_unix_time(ss[s_id]['s_start'])))
      .append( $(BR) )
-     .append( $(LABEL).text( wdhm(unix_timestamp() - ss[s_id]['s_start']) ) )
+     .append( ss[s_id]['s_start'] == 0?$(LABEL):$(LABEL).text( wdhm(unix_timestamp() - ss[s_id]['s_start']) ) )
    )
   ; // 5
   tr.append( $(TD).append( $(LABEL).text(Number(ss[s_id]['s_bytes_in']) + Number(ss[s_id]['s_bytes_out'])) ) ); // 6
@@ -631,8 +631,8 @@ function jnl_row(i) {
   ; // 2
   tr.append( $(TD).append( $(LABEL).text(es[i]['h_speed']) ) ); // 3
 
-  tr.append( $(TD) .append( $(LABEL).text(es[i]['h_auth']) )) ; // 4
-  tr.append( $(TD).append( $(LABEL).text(from_unix_time(es[i]['h_auth'])))) ; // 5
+  tr.append( $(TD) .append( $(LABEL).text(es[i]['h_start']) )) ; // 4
+  tr.append( $(TD).append( $(LABEL).text(from_unix_time(es[i]['h_start'])))) ; // 5
 
   tr .append( $(TD) .append( $(LABEL).text(es[i]['h_stop']) )) ; // 6
 

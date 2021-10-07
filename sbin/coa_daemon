@@ -194,7 +194,7 @@ MAIN_LOOP: while(1) {
   if($radiusd_running <= $RADIUSD_MIN_RUNTIME || #radiusd not running or just started
      ($last_db_ok - $last_db_error) <= $RADIUSD_MIN_RUNTIME #DB not long enough in good condition
   ) {
-    set_state("WARN radiusd not running or just started or DB not long enough in good condition");
+    set_state("WARN radiusd not running or just started or DB not long enough in good condition. Radiusd running for $radiusd_running seconds of $RADIUSD_MIN_RUNTIME");
     if(!defined($max_runs)) { sleep(10); };
     next;
   };

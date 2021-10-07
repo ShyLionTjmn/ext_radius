@@ -206,9 +206,11 @@ if($q['action'] == 'user_check') {
       global $q;
       global $mac;
       $rq="SELECT $t.*, IFNULL(us.u_address, '') as u_address, '$t' as h_table FROM $t LEFT JOIN us ON us.u_vg_id=$t.h_vg_id WHERE ";
-      $rq .= "((h_auth >= ".mq($q['from'])." AND h_auth <= ".mq($q['to']).") OR";
+      $rq .= "(";
+      #$rq .= "(h_auth >= ".mq($q['from'])." AND h_auth <= ".mq($q['to']).") OR";
       $rq .= " (h_start >= ".mq($q['from'])." AND h_start <= ".mq($q['to']).") OR";
-      $rq .= " (h_stop >= ".mq($q['from'])." AND h_stop <= ".mq($q['to'])."))";
+      $rq .= " (h_stop >= ".mq($q['from'])." AND h_stop <= ".mq($q['to']).")";
+      $rq .= ")";
 
       $rq .= " AND (";
       $rq .= " FALSE";
